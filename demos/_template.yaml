@@ -1,0 +1,5 @@
+# Template demo YAML. Loaded as the welcome screen when the app starts, before
+# any real demo is picked from the dropdown in the top bar. Has no input, model,
+# or post section on purpose, so nothing runs; the dashboard just shows a message
+# pointing at the demo dropdown. Filenames starting with "_" are skipped when the
+# backend lists available demos.

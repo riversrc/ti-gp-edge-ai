@@ -1,0 +1,6 @@
+/*
+  Dashboard look, matching the fan blade demo (dark panels, red top bar).
+  The widget area is a CSS Grid with 12 columns; each widget spans the
+  cols/rows given in the demo YAML. System fonts only, no web fonts.
+  Not implemented yet.
+*/
