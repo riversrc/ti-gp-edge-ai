@@ -3,3 +3,20 @@
 # or post section on purpose, so nothing runs; the dashboard just shows a message
 # pointing at the demo dropdown. Filenames starting with "_" are skipped when the
 # backend lists available demos.
+#
+# To make a new demo, copy fan_blade_anomaly.yaml (not this file); it shows
+# every section a real demo needs.
+
+title: GP Edge AI
+description: Time-series edge AI demos on the TI AM64x.
+
+# No input, window, pre, model, or post: the engine sees no input section
+# and just idles until a demo is picked.
+
+dashboard:
+  - widget: message
+    cols: 12
+    rows: 2
+    heading: Pick a demo to start
+    text: Use the demo menu in the top bar. You can switch demos at any time.
+    arrow: up                  # points at the dropdown in the top bar

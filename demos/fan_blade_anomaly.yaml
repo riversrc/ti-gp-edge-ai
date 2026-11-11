@@ -1,1 +1,174 @@
-# Demo config for the fan blade anomaly detection demo. 
+# Fan blade anomaly detection demo.
+#
+# Ported from TI's fan blade demo (sitara-edgai-time-series, app_fan_blade/).
+# Every number here comes from that code, so this demo should produce the
+# same scores as the original. Comments in [brackets] name the original
+# constant or line each value came from (data_source.py unless noted).
+#
+# File paths (datasets/, models/) are relative to the repo root, never to the
+# directory the app was started from. Paths in the dashboard (assets/...) are
+# URLs, relative to the frontend/ folder the web server serves.
+#
+# How blocks pass data (details in docs/blocks.md):
+#   - By default each block receives the previous block's result.
+#   - "output: name" also saves a block's result under that name, and later
+#     blocks can read it by that bare name (see "compare" and "input" below).
+
+title: Fan Blade Anomaly Detection
+description: An autoencoder learned what a healthy fan's vibration looks like. When the fan is damaged, imbalanced or blocked, the model can't rebuild the signal well, so its reconstruction error jumps above the threshold.
+task: anomaly_detection
+
+# ── Where the data comes from ────────────────────────────────────────────────
+input:
+  type: csv                    # only "csv" for now; "uart" / "ethernet" later
+  sample_rate: 4000            # Hz, ADXL355 accelerometer
+  columns: [Vibx, Viby, Vibz]  # CSV header is Time,Vibx,Viby,Vibz; Time is dropped
+                               # [_drop_time_column]
+  loop: true                   # restart a scenario's recordings when they run out
+  skip_file_seams: true        # never let a window cross from one CSV into the next
+                               # [_concat_with_boundaries / _advance_pos]
+
+  # One entry per scenario button. The first one plays at startup.
+  # "match" picks files by name (case does not matter), because all fault
+  # recordings share one Anomaly/ folder with the fault type in the filename.
+  # Files are sorted by name, then the first max_files are used.
+  scenarios:
+    - id: normal
+      label: Normal
+      folder: datasets/fan_blade/Normal
+      max_files: 5             # [csvs[:5]] keeps startup load time down
+    - id: damage
+      label: Blade Damage
+      folder: datasets/fan_blade/Anomaly
+      match: damage            # also matches the "BladeIDamage" typo in some filenames
+      max_files: 3             # [[:3] per fault type]
+    - id: imbalance
+      label: Blade Imbalance
+      folder: datasets/fan_blade/Anomaly
+      match: imbalance
+      max_files: 3
+    - id: obstruction
+      label: Blade Obstruction
+      folder: datasets/fan_blade/Anomaly
+      match: obstruction
+      max_files: 3
+
+# ── How the stream is cut into windows ───────────────────────────────────────
+# Each window is the last 1024 samples; the window slides 256 samples at a time.
+# 256 / 4000 Hz = 64 ms per window, about 15.6 windows per second. The engine
+# paces to stride / sample_rate, so playback runs at the speed the fan was
+# recorded. (The original's code sleeps 1/15 s = 66.7 ms per window, GUI_HZ = 15
+# in web_fan_blower.py, although its own comment says 15.6 Hz. The score of each
+# window does not depend on pacing, so scores still match.)
+window:
+  size: 1024                   # [STRIDE * N_FRAMES = 256 * 4]
+                               # config_loader checks: size == frame_size * n_frames
+  stride: 256                  # [STRIDE] equal to frame_size only in this demo
+
+# ── Pre-processing blocks (run in order) ─────────────────────────────────────
+# Window (1024 x 3) -> 4 frames of 256 samples -> FFT each frame -> drop 0 Hz
+# -> keep 128 bins -> average every 8 bins (16 bins) -> dB -> stack the 4
+# frames -> (3, 64). Then reshape to what the model expects.
+pre:
+  - block: spectral_features
+    frame_size: 256            # [STRIDE]
+    n_frames: 4                # [N_FRAMES]
+    fft_bins: 128              # [FFT_BINS] bins kept after dropping bin 0 (DC)
+    drop_dc: true
+    bin_size: 8                # [BIN_SIZE] adjacent bins averaged -> 16 per frame
+    scale: db                  # 20 * log10(x + 1e-9)
+    output_shape: [3, 64]      # one row per axis, 4 frames x 16 bins
+                               # config_loader checks: [len(input.columns),
+                               #                        n_frames * fft_bins / bin_size]
+    output: features           # saved so reconstruction_error can compare against it
+
+  - block: reshape
+    shape: [1, 3, 64, 1]       # [features.reshape(1, 3, N_BINS, 1)]
+    dtype: float32
+
+# ── AI model ─────────────────────────────────────────────────────────────────
+# Receives the reshaped features (the previous block's result).
+model:
+  path: models/fan_blade/model.onnx   # AD_17k autoencoder, provided by TI
+  target: cpu                  # "cpu" for V0; "tidl" later (needs compiled artifacts)
+  threads: 1                   # [--threads] 1 is fastest on the 2-core AM64x
+  # artifacts: models/fan_blade/artifacts   # only used when target: tidl
+  output: recon                # the model's rebuilt version of the features
+
+# ── Post-processing blocks (run in order) ────────────────────────────────────
+# Results saved here with "output:" are sent to the dashboard as outputs.<name>.
+post:
+  - block: reconstruction_error
+    compare: [features, recon] # recon is reshaped to features' shape (3, 64) first;
+                               # same element order, so the math is unchanged
+    method: mse                # [np.mean((features - recon) ** 2)]
+    output: score
+
+  - block: threshold
+    input: score
+    limit: 45.0                # trained value is 29.64; raised to 45 because file
+                               # seams still reach ~41 on normal data
+                               # [THRESHOLD in web_fan_blower.py]
+    above: FAULT
+    below: GOOD
+    output: status
+
+# ── Dashboard ────────────────────────────────────────────────────────────────
+# 12-column grid. cols/rows = how many grid cells the widget covers.
+# "source" points the widget at data in each frame (see docs/frame_format.md).
+# A setting written as <section>.<block>.<key> (here post.threshold.limit) is
+# replaced by that config value before the dashboard list is sent to the
+# browser, so widgets only ever see plain values.
+dashboard:
+  - widget: scenario_buttons
+    title: Fault Injector
+    cols: 3
+    rows: 2
+    source: scenarios          # the scenario list in the "demo" message, one button each
+    icons: assets/fan_blade/   # normal.svg, damage.svg, imbalance.svg, obstruction.svg
+
+  - widget: line_chart
+    title: Vibration (raw)
+    cols: 6
+    rows: 2
+    source: signals.window     # the 1024 x 3 window, before pre-processing
+    series: [Vibx, Viby, Vibz]
+    x_label: samples
+
+  - widget: status
+    title: Fan Status
+    cols: 3
+    rows: 1
+    source: outputs.status
+    value: outputs.score
+    colors: { GOOD: green, FAULT: red }
+
+  - widget: image
+    title: Board
+    cols: 3
+    rows: 1
+    src: assets/shared/AM64B.png
+
+  - widget: history_bars
+    title: Reconstruction Error
+    cols: 6
+    rows: 2
+    source: outputs.score
+    history: 60                # last 60 windows (~4 s)
+    scale: log
+    threshold: post.threshold.limit   # dashed line; becomes 45.0 (one place to change it)
+
+  - widget: metrics
+    title: Performance
+    cols: 3
+    rows: 2
+    source: timing_us          # one row per block, plus total
+    fps: system.fps            # shown as an extra row
+    units: ms
+
+  - widget: usage_bars
+    title: System
+    cols: 3
+    rows: 2
+    source: system
+    fields: [cpu_pct, mem_pct] # bars to show; system also holds fps, which is not a percentage
